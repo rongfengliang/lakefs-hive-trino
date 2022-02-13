@@ -1,0 +1,115 @@
+version: "3"
+services:
+  lakefs:
+    image: "treeverse/lakefs:${VERSION:-latest}"
+    ports:
+      - "8000:8000"
+    depends_on:
+      - "postgres"
+    environment:
+      - LAKEFS_AUTH_ENCRYPT_SECRET_KEY=${LAKEFS_AUTH_ENCRYPT_SECRET_KEY:-some random secret string}
+      - LAKEFS_DATABASE_CONNECTION_STRING=${LAKEFS_DATABASE_CONNECTION_STRING:-postgres://lakefs:lakefs@postgres/postgres?sslmode=disable}
+      - LAKEFS_BLOCKSTORE_TYPE=${LAKEFS_BLOCKSTORE_TYPE:-s3}
+      - LAKEFS_BLOCKSTORE_LOCAL_PATH=${LAKEFS_BLOCKSTORE_LOCAL_PATH:-/home/lakefs}
+      - LAKEFS_GATEWAYS_S3_DOMAIN_NAME=${LAKEFS_GATEWAYS_S3_DOMAIN_NAME:-s3.local.lakefs.io:8000}
+      - LAKEFS_BLOCKSTORE_S3_CREDENTIALS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-minio}
+      - LAKEFS_BLOCKSTORE_S3_CREDENTIALS_ACCESS_SECRET_KEY=${AWS_SECRET_ACCESS_KEY:-minio123}
+      - LAKEFS_LOGGING_LEVEL=${LAKEFS_LOGGING_LEVEL:-INFO}
+      - LAKEFS_STATS_ENABLED
+      - LAKEFS_BLOCKSTORE_S3_ENDPOINT=http://s3:9000
+      - LAKEFS_BLOCKSTORE_S3_FORCE_PATH_STYLE=true
+      - LAKEFS_COMMITTED_LOCAL_CACHE_DIR=${LAKEFS_COMMITTED_LOCAL_CACHE_DIR:-/home/lakefs/.local_tier}
+    entrypoint:
+      [
+        "/app/wait-for",
+        "postgres:5432",
+        "--",
+        "/app/lakefs",
+        "run"
+      ]
+  postgres:
+    image: postgres:11
+    container_name: postgres
+    environment:
+      POSTGRES_USER: lakefs
+      POSTGRES_PASSWORD: lakefs
+
+  mariadb:
+    image: mariadb:10
+    container_name: mariadb
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: admin
+      MYSQL_USER: admin
+      MYSQL_PASSWORD: admin
+      MYSQL_DATABASE: metastore_db
+  s3:
+    image: minio/minio
+    environment:
+      - "MINIO_ACCESS_KEY=minio"
+      - "MINIO_SECRET_KEY=minio123"
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+  hive-metastore:
+    image: dalongrong/hive-metastore:3.2.0
+    container_name: hive
+    depends_on:
+      - mariadb
+    ports:
+      - 9083:9083
+    environment:
+      - DB_URI=mariadb:3306
+    volumes:
+      - ./etc/hive-site.xml:/opt/apache-hive-bin/conf/hive-site.xml
+
+  trino:
+    image: trinodb/trino:370
+    container_name: trino
+    environment:
+      - AWS_ACCOUNT_ID
+      - LAKEFS_BLOCKSTORE_S3_CREDENTIALS_ACCESS_KEY_ID
+      - LAKEFS_BLOCKSTORE_S3_CREDENTIALS_SECRET_ACCESS_KEY
+      - LAKECTL_METASTORE_GLUE_CREDENTIALS_ACCESS_KEY_ID
+      - LAKECTL_METASTORE_GLUE_CREDENTIALS_ACCESS_SECRET_KEY
+    volumes:
+      # - ./etc/s3.properties:/etc/trino/catalog/s3.properties
+      - ./etc/lakefs.properties:/etc/trino/catalog/lakefs.properties
+    ports:
+      - "8080:8080"
+
+  trino-client:
+    image: trinodb/trino:358
+    profiles: [ "client" ]
+    entrypoint:
+      [
+        "trino",
+        "--server",
+        "trino:8080",
+        "--catalog",
+        "s3",
+        "--schema",
+        "default"
+      ]
+
+  create-dbt-schema-main:
+    image: trinodb/trino:358
+    profiles: [ "client" ]
+    entrypoint:
+      [
+        "trino",
+        "--server",
+        "trino:8080",
+        "--catalog",
+        "lakefs",
+        "--execute",
+        "drop schema if exists dbt_main; create schema dbt_main with (location = 's3://example/main/dbt' )"
+      ]
+  dremio:
+    build: ./
+    ports:
+      - "9047:9047"
+      - "31010:31010"
+      - "8849:8849"
